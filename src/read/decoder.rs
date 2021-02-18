@@ -1,4 +1,5 @@
-use crate::{decode_config_slice, Config, DecodeError};
+use crate::engine::Engine;
+use crate::{decode_engine_slice, DecodeError};
 use std::io::Read;
 use std::{cmp, fmt, io};
 
@@ -19,8 +20,9 @@ const DECODED_CHUNK_SIZE: usize = 3;
 ///
 /// // use a cursor as the simplest possible `Read` -- in real code this is probably a file, etc.
 /// let mut wrapped_reader = Cursor::new(b"YXNkZg==");
-/// let mut decoder = base64::read::DecoderReader::new(
-///     &mut wrapped_reader, base64::STANDARD);
+/// let mut decoder = base64::read::DecoderReader::from(
+///     &mut wrapped_reader,
+///     &base64::engine::DEFAULT_ENGINE);
 ///
 /// // handle errors as you normally would
 /// let mut result = Vec::new();
@@ -29,8 +31,8 @@ const DECODED_CHUNK_SIZE: usize = 3;
 /// assert_eq!(b"asdf", &result[..]);
 ///
 /// ```
-pub struct DecoderReader<R: io::Read> {
-    config: Config,
+pub struct DecoderReader<'e, E: Engine, R: io::Read> {
+    engine: &'e E,
     /// Where b64 data is read from
     inner: R,
 
@@ -54,10 +56,9 @@ pub struct DecoderReader<R: io::Read> {
     total_b64_decoded: usize,
 }
 
-impl<R: io::Read> fmt::Debug for DecoderReader<R> {
+impl<'e, E: Engine, R: io::Read> fmt::Debug for DecoderReader<'e, E, R> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("DecoderReader")
-            .field("config", &self.config)
             .field("b64_offset", &self.b64_offset)
             .field("b64_len", &self.b64_len)
             .field("decoded_buffer", &self.decoded_buffer)
@@ -68,11 +69,11 @@ impl<R: io::Read> fmt::Debug for DecoderReader<R> {
     }
 }
 
-impl<R: io::Read> DecoderReader<R> {
-    /// Create a new decoder that will read from the provided reader.
-    pub fn new(reader: R, config: Config) -> Self {
+impl<'e, E: Engine, R: io::Read> DecoderReader<'e, E, R> {
+    /// Create a new decoder that will read from the provided reader `r`.
+    pub fn from(reader: R, engine: &'e E) -> Self {
         DecoderReader {
-            config,
+            engine,
             inner: reader,
             b64_buffer: [0; BUF_SIZE],
             b64_offset: 0,
@@ -132,10 +133,10 @@ impl<R: io::Read> DecoderReader<R> {
         debug_assert!(self.b64_offset + self.b64_len <= BUF_SIZE);
         debug_assert!(buf.len() > 0);
 
-        let decoded = decode_config_slice(
+        let decoded = decode_engine_slice(
             &self.b64_buffer[self.b64_offset..self.b64_offset + num_bytes],
-            self.config,
             &mut buf[..],
+            self.engine,
         )
         .map_err(|e| match e {
             DecodeError::InvalidByte(offset, byte) => {
@@ -168,7 +169,7 @@ impl<R: io::Read> DecoderReader<R> {
     }
 }
 
-impl<R: Read> Read for DecoderReader<R> {
+impl<'e, E: Engine, R: Read> Read for DecoderReader<'e, E, R> {
     /// Decode input from the wrapped reader.
     ///
     /// Under non-error circumstances, this returns `Ok` with the value being the number of bytes

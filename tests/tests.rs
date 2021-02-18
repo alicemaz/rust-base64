@@ -3,16 +3,20 @@ extern crate rand;
 
 use rand::{FromEntropy, Rng};
 
+use base64::engine::{Engine, DEFAULT_ENGINE};
 use base64::*;
 
-mod helpers;
 use self::helpers::*;
+use base64::alphabet::STANDARD;
+use base64::engine::fast_portable::{FastPortable, NO_PAD};
+
+mod helpers;
 
 // generate random contents of the specified length and test encode/decode roundtrip
-fn roundtrip_random(
+fn roundtrip_random<E: Engine>(
     byte_buf: &mut Vec<u8>,
     str_buf: &mut String,
-    config: Config,
+    engine: &E,
     byte_len: usize,
     approx_values_per_byte: u8,
     max_rounds: u64,
@@ -30,8 +34,8 @@ fn roundtrip_random(
             byte_buf.push(r.gen::<u8>());
         }
 
-        encode_config_buf(&byte_buf, config, str_buf);
-        decode_config_buf(&str_buf, config, &mut decode_buf).unwrap();
+        encode_engine_string(&byte_buf, str_buf, engine);
+        decode_engine_vec(&str_buf, &mut decode_buf, engine).unwrap();
 
         assert_eq!(byte_buf, &decode_buf);
     }
@@ -52,17 +56,20 @@ fn calculate_number_of_rounds(byte_len: usize, approx_values_per_byte: u8, max: 
     prod
 }
 
-fn no_pad_config() -> Config {
-    Config::new(CharacterSet::Standard, false)
-}
-
 #[test]
 fn roundtrip_random_short_standard() {
     let mut byte_buf: Vec<u8> = Vec::new();
     let mut str_buf = String::new();
 
     for input_len in 0..40 {
-        roundtrip_random(&mut byte_buf, &mut str_buf, STANDARD, input_len, 4, 10000);
+        roundtrip_random(
+            &mut byte_buf,
+            &mut str_buf,
+            &DEFAULT_ENGINE,
+            input_len,
+            4,
+            10000,
+        );
     }
 }
 
@@ -72,7 +79,14 @@ fn roundtrip_random_with_fast_loop_standard() {
     let mut str_buf = String::new();
 
     for input_len in 40..100 {
-        roundtrip_random(&mut byte_buf, &mut str_buf, STANDARD, input_len, 4, 1000);
+        roundtrip_random(
+            &mut byte_buf,
+            &mut str_buf,
+            &DEFAULT_ENGINE,
+            input_len,
+            4,
+            1000,
+        );
     }
 }
 
@@ -81,15 +95,9 @@ fn roundtrip_random_short_no_padding() {
     let mut byte_buf: Vec<u8> = Vec::new();
     let mut str_buf = String::new();
 
+    let engine = FastPortable::from(&STANDARD, NO_PAD);
     for input_len in 0..40 {
-        roundtrip_random(
-            &mut byte_buf,
-            &mut str_buf,
-            no_pad_config(),
-            input_len,
-            4,
-            10000,
-        );
+        roundtrip_random(&mut byte_buf, &mut str_buf, &engine, input_len, 4, 10000);
     }
 }
 
@@ -98,15 +106,10 @@ fn roundtrip_random_no_padding() {
     let mut byte_buf: Vec<u8> = Vec::new();
     let mut str_buf = String::new();
 
+    let engine = FastPortable::from(&STANDARD, NO_PAD);
+
     for input_len in 40..100 {
-        roundtrip_random(
-            &mut byte_buf,
-            &mut str_buf,
-            no_pad_config(),
-            input_len,
-            4,
-            1000,
-        );
+        roundtrip_random(&mut byte_buf, &mut str_buf, &engine, input_len, 4, 1000);
     }
 }
 
@@ -126,7 +129,10 @@ fn roundtrip_decode_trailing_10_bytes() {
         let decoded = decode(&s).unwrap();
         assert_eq!(num_quads * 3 + 7, decoded.len());
 
-        assert_eq!(s, encode_config(&decoded, STANDARD_NO_PAD));
+        assert_eq!(
+            s,
+            encode_engine(&decoded, &FastPortable::from(&STANDARD, NO_PAD))
+        );
     }
 }
 
@@ -143,7 +149,7 @@ fn display_wrapper_matches_normal_encode() {
         encode(&bytes),
         format!(
             "{}",
-            base64::display::Base64Display::with_config(&bytes, STANDARD)
+            base64::display::Base64Display::from(&bytes, &DEFAULT_ENGINE)
         )
     );
 }
@@ -156,32 +162,37 @@ fn because_we_can() {
 }
 
 #[test]
-fn encode_config_slice_can_use_inline_buffer() {
+fn encode_engine_slice_can_use_inline_buffer() {
     let mut buf: [u8; 22] = [0; 22];
     let mut larger_buf: [u8; 24] = [0; 24];
     let mut input: [u8; 16] = [0; 16];
+
+    let engine = FastPortable::from(&STANDARD, NO_PAD);
 
     let mut rng = rand::rngs::SmallRng::from_entropy();
     for elt in &mut input {
         *elt = rng.gen();
     }
 
-    assert_eq!(22, encode_config_slice(&input, STANDARD_NO_PAD, &mut buf));
-    let decoded = decode_config(&buf, STANDARD_NO_PAD).unwrap();
+    assert_eq!(22, encode_engine_slice(&input, &mut buf, &engine));
+    let decoded = decode_engine(&buf, &engine).unwrap();
 
     assert_eq!(decoded, input);
 
     // let's try it again with padding
 
-    assert_eq!(24, encode_config_slice(&input, STANDARD, &mut larger_buf));
-    let decoded = decode_config(&buf, STANDARD).unwrap();
+    assert_eq!(
+        24,
+        encode_engine_slice(&input, &mut larger_buf, &DEFAULT_ENGINE)
+    );
+    let decoded = decode_engine(&buf, &DEFAULT_ENGINE).unwrap();
 
     assert_eq!(decoded, input);
 }
 
 #[test]
 #[should_panic(expected = "index 24 out of range for slice of length 22")]
-fn encode_config_slice_panics_when_buffer_too_small() {
+fn encode_engine_slice_panics_when_buffer_too_small() {
     let mut buf: [u8; 22] = [0; 22];
     let mut input: [u8; 16] = [0; 16];
 
@@ -190,5 +201,5 @@ fn encode_config_slice_panics_when_buffer_too_small() {
         *elt = rng.gen();
     }
 
-    encode_config_slice(&input, STANDARD, &mut buf);
+    encode_engine_slice(&input, &mut buf, &DEFAULT_ENGINE);
 }

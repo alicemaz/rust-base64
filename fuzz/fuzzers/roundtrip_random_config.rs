@@ -7,9 +7,9 @@ use base64::*;
 mod utils;
 
 fuzz_target!(|data: &[u8]| {
-    let config = utils::random_config(data);
+    let engine = utils::random_engine(data);
 
-    let encoded = encode_config(&data, config);
-    let decoded = decode_config(&encoded, config).unwrap();
+    let encoded = encode_engine(&data, &engine);
+    let decoded = decode_engine(&encoded, &engine).unwrap();
     assert_eq!(data, decoded.as_slice());
 });

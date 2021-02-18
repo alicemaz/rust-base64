@@ -1,12 +1,11 @@
-use crate::{
-    encode::{add_padding, encode_to_slice},
-    Config,
-};
 #[cfg(any(feature = "alloc", feature = "std", test))]
 use alloc::string::String;
 use core::cmp;
 #[cfg(any(feature = "alloc", feature = "std", test))]
 use core::str;
+
+use crate::encode::add_padding;
+use crate::engine::{Config, Engine};
 
 /// The output mechanism for ChunkedEncoder's encoded bytes.
 pub trait Sink {
@@ -19,23 +18,21 @@ pub trait Sink {
 const BUF_SIZE: usize = 1024;
 
 /// A base64 encoder that emits encoded bytes in chunks without heap allocation.
-pub struct ChunkedEncoder {
-    config: Config,
+pub struct ChunkedEncoder<'e, E: Engine> {
+    engine: &'e E,
     max_input_chunk_len: usize,
 }
 
-impl ChunkedEncoder {
-    pub fn new(config: Config) -> ChunkedEncoder {
+impl<'e, E: Engine> ChunkedEncoder<'e, E> {
+    pub fn from(engine: &'e E) -> ChunkedEncoder<'e, E> {
         ChunkedEncoder {
-            config,
-            max_input_chunk_len: max_input_length(BUF_SIZE, config),
+            engine,
+            max_input_chunk_len: max_input_length(BUF_SIZE, engine.config().padding()),
         }
     }
 
     pub fn encode<S: Sink>(&self, bytes: &[u8], sink: &mut S) -> Result<(), S::Error> {
         let mut encode_buf: [u8; BUF_SIZE] = [0; BUF_SIZE];
-        let encode_table = self.config.char_set.encode_table();
-
         let mut input_index = 0;
 
         while input_index < bytes.len() {
@@ -44,12 +41,12 @@ impl ChunkedEncoder {
 
             let chunk = &bytes[input_index..(input_index + input_chunk_len)];
 
-            let mut b64_bytes_written = encode_to_slice(chunk, &mut encode_buf, encode_table);
+            let mut b64_bytes_written = self.engine.encode(chunk, &mut encode_buf);
 
             input_index += input_chunk_len;
             let more_input_left = input_index < bytes.len();
 
-            if self.config.pad && !more_input_left {
+            if self.engine.config().padding() && !more_input_left {
                 // no more input, add padding if needed. Buffer will have room because
                 // max_input_length leaves room for it.
                 b64_bytes_written += add_padding(bytes.len(), &mut encode_buf[b64_bytes_written..]);
@@ -69,8 +66,8 @@ impl ChunkedEncoder {
 ///
 /// The input length will always be a multiple of 3 so that no encoding state has to be carried over
 /// between chunks.
-fn max_input_length(encoded_buf_len: usize, config: Config) -> usize {
-    let effective_buf_len = if config.pad {
+fn max_input_length(encoded_buf_len: usize, padded: bool) -> usize {
+    let effective_buf_len = if padded {
         // make room for padding
         encoded_buf_len
             .checked_sub(2)
@@ -91,7 +88,7 @@ pub(crate) struct StringSink<'a> {
 
 #[cfg(any(feature = "alloc", feature = "std", test))]
 impl<'a> StringSink<'a> {
-    pub(crate) fn new(s: &mut String) -> StringSink {
+    pub(crate) fn from(s: &mut String) -> StringSink {
         StringSink { string: s }
     }
 }
@@ -109,26 +106,27 @@ impl<'a> Sink for StringSink<'a> {
 
 #[cfg(test)]
 pub mod tests {
-    use super::*;
-    use crate::{encode_config_buf, tests::random_config, CharacterSet, STANDARD};
-
     use rand::{
         distributions::{Distribution, Uniform},
         FromEntropy, Rng,
     };
 
+    use crate::alphabet::STANDARD;
+    use crate::encode_engine_string;
+    use crate::engine::fast_portable::{FastPortable, FastPortableConfig, PAD};
+    use crate::tests::random_engine;
+
+    use super::*;
+
     #[test]
     fn chunked_encode_empty() {
-        assert_eq!("", chunked_encode_str(&[], STANDARD));
+        assert_eq!("", chunked_encode_str(&[], PAD));
     }
 
     #[test]
     fn chunked_encode_intermediate_fast_loop() {
         // > 8 bytes input, will enter the pretty fast loop
-        assert_eq!(
-            "Zm9vYmFyYmF6cXV4",
-            chunked_encode_str(b"foobarbazqux", STANDARD)
-        );
+        assert_eq!("Zm9vYmFyYmF6cXV4", chunked_encode_str(b"foobarbazqux", PAD));
     }
 
     #[test]
@@ -136,14 +134,14 @@ pub mod tests {
         // > 32 bytes input, will enter the uber fast loop
         assert_eq!(
             "Zm9vYmFyYmF6cXV4cXV1eGNvcmdlZ3JhdWx0Z2FycGx5eg==",
-            chunked_encode_str(b"foobarbazquxquuxcorgegraultgarplyz", STANDARD)
+            chunked_encode_str(b"foobarbazquxquuxcorgegraultgarplyz", PAD)
         );
     }
 
     #[test]
     fn chunked_encode_slow_loop_only() {
         // < 8 bytes input, slow loop only
-        assert_eq!("Zm9vYmFy", chunked_encode_str(b"foobar", STANDARD));
+        assert_eq!("Zm9vYmFy", chunked_encode_str(b"foobar", PAD));
     }
 
     #[test]
@@ -154,32 +152,27 @@ pub mod tests {
 
     #[test]
     fn max_input_length_no_pad() {
-        let config = config_with_pad(false);
-        assert_eq!(768, max_input_length(1024, config));
+        assert_eq!(768, max_input_length(1024, false));
     }
 
     #[test]
     fn max_input_length_with_pad_decrements_one_triple() {
-        let config = config_with_pad(true);
-        assert_eq!(765, max_input_length(1024, config));
+        assert_eq!(765, max_input_length(1024, true));
     }
 
     #[test]
     fn max_input_length_with_pad_one_byte_short() {
-        let config = config_with_pad(true);
-        assert_eq!(765, max_input_length(1025, config));
+        assert_eq!(765, max_input_length(1025, true));
     }
 
     #[test]
     fn max_input_length_with_pad_fits_exactly() {
-        let config = config_with_pad(true);
-        assert_eq!(768, max_input_length(1026, config));
+        assert_eq!(768, max_input_length(1026, true));
     }
 
     #[test]
     fn max_input_length_cant_use_extra_single_encoded_byte() {
-        let config = Config::new(crate::CharacterSet::Standard, false);
-        assert_eq!(300, max_input_length(401, config));
+        assert_eq!(300, max_input_length(401, false));
     }
 
     pub fn chunked_encode_matches_normal_encode_random<S: SinkTestHelper>(sink_test_helper: &S) {
@@ -197,47 +190,40 @@ pub mod tests {
                 input_buf.push(rng.gen());
             }
 
-            let config = random_config(&mut rng);
+            let engine = random_engine(&mut rng);
 
-            let chunk_encoded_string = sink_test_helper.encode_to_string(config, &input_buf);
-            encode_config_buf(&input_buf, config, &mut output_buf);
+            let chunk_encoded_string = sink_test_helper.encode_to_string(&engine, &input_buf);
+            encode_engine_string(&input_buf, &mut output_buf, &engine);
 
-            assert_eq!(
-                output_buf, chunk_encoded_string,
-                "input len={}, config: pad={}",
-                buf_len, config.pad
-            );
+            assert_eq!(output_buf, chunk_encoded_string, "input len={}", buf_len);
         }
     }
 
-    fn chunked_encode_str(bytes: &[u8], config: Config) -> String {
+    fn chunked_encode_str(bytes: &[u8], config: FastPortableConfig) -> String {
         let mut s = String::new();
         {
-            let mut sink = StringSink::new(&mut s);
-            let encoder = ChunkedEncoder::new(config);
+            let mut sink = StringSink::from(&mut s);
+            let engine = FastPortable::from(&STANDARD, config);
+            let encoder = ChunkedEncoder::from(&engine);
             encoder.encode(bytes, &mut sink).unwrap();
         }
 
         return s;
     }
 
-    fn config_with_pad(pad: bool) -> Config {
-        Config::new(CharacterSet::Standard, pad)
-    }
-
     // An abstraction around sinks so that we can have tests that easily to any sink implementation
     pub trait SinkTestHelper {
-        fn encode_to_string(&self, config: Config, bytes: &[u8]) -> String;
+        fn encode_to_string<E: Engine>(&self, engine: &E, bytes: &[u8]) -> String;
     }
 
     struct StringSinkTestHelper;
 
     impl SinkTestHelper for StringSinkTestHelper {
-        fn encode_to_string(&self, config: Config, bytes: &[u8]) -> String {
-            let encoder = ChunkedEncoder::new(config);
+        fn encode_to_string<E: Engine>(&self, engine: &E, bytes: &[u8]) -> String {
+            let encoder = ChunkedEncoder::from(engine);
             let mut s = String::new();
             {
-                let mut sink = StringSink::new(&mut s);
+                let mut sink = StringSink::from(&mut s);
                 encoder.encode(bytes, &mut sink).unwrap();
             }
 

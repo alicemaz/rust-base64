@@ -1,8 +1,8 @@
-use crate::encode::encode_to_slice;
-use crate::{encode_config_slice, Config};
+use crate::encode_engine_slice;
+use crate::engine::Engine;
 use std::{
-    cmp, fmt,
-    io::{ErrorKind, Result, Write},
+    cmp, fmt, io,
+    io::{ErrorKind, Result},
 };
 
 pub(crate) const BUF_SIZE: usize = 1024;
@@ -25,7 +25,9 @@ const MIN_ENCODE_CHUNK_SIZE: usize = 3;
 /// use std::io::Write;
 ///
 /// // use a vec as the simplest possible `Write` -- in real code this is probably a file, etc.
-/// let mut enc = base64::write::EncoderWriter::new(Vec::new(), base64::STANDARD);
+/// let mut enc = base64::write::EncoderWriter::from(
+///     Vec::new(),
+///     &base64::engine::DEFAULT_ENGINE);
 ///
 /// // handle errors as you normally would
 /// enc.write_all(b"asdf").unwrap();
@@ -53,8 +55,8 @@ const MIN_ENCODE_CHUNK_SIZE: usize = 3;
 ///
 /// It has some minor performance loss compared to encoding slices (a couple percent).
 /// It does not do any heap allocation.
-pub struct EncoderWriter<W: Write> {
-    config: Config,
+pub struct EncoderWriter<'e, E: Engine, W: io::Write> {
+    engine: &'e E,
     /// Where encoded data is written to. It's an Option as it's None immediately before Drop is
     /// called so that finish() can return the underlying writer. None implies that finish() has
     /// been called successfully.
@@ -73,7 +75,7 @@ pub struct EncoderWriter<W: Write> {
     panicked: bool,
 }
 
-impl<W: Write> fmt::Debug for EncoderWriter<W> {
+impl<'e, E: Engine, W: io::Write> fmt::Debug for EncoderWriter<'e, E, W> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
@@ -86,12 +88,12 @@ impl<W: Write> fmt::Debug for EncoderWriter<W> {
     }
 }
 
-impl<W: Write> EncoderWriter<W> {
-    /// Create a new encoder that will write to the provided delegate writer `w`.
-    pub fn new(w: W, config: Config) -> EncoderWriter<W> {
+impl<'e, E: Engine, W: io::Write> EncoderWriter<'e, E, W> {
+    /// Create a new encoder that will write to the provided delegate writer.
+    pub fn from(delegate: W, engine: &'e E) -> EncoderWriter<'e, E, W> {
         EncoderWriter {
-            config,
-            delegate: Some(w),
+            engine,
+            delegate: Some(delegate),
             extra_input: [0u8; MIN_ENCODE_CHUNK_SIZE],
             extra_input_occupied_len: 0,
             output: [0u8; BUF_SIZE],
@@ -141,10 +143,10 @@ impl<W: Write> EncoderWriter<W> {
         self.write_all_encoded_output()?;
 
         if self.extra_input_occupied_len > 0 {
-            let encoded_len = encode_config_slice(
+            let encoded_len = encode_engine_slice(
                 &self.extra_input[..self.extra_input_occupied_len],
-                self.config,
                 &mut self.output[..],
+                self.engine,
             );
 
             self.output_occupied_len = encoded_len;
@@ -182,7 +184,7 @@ impl<W: Write> EncoderWriter<W> {
                 self.output_occupied_len = current_output_len.checked_sub(consumed).unwrap();
                 // If we're blocking on I/O, the minor inefficiency of copying bytes to the
                 // start of the buffer is the least of our concerns...
-                // Rotate moves more than we need to, but copy_within isn't stabilized yet.
+                // TODO Rotate moves more than we need to; copy_within now stable.
                 self.output.rotate_left(consumed);
             } else {
                 self.output_occupied_len = 0;
@@ -236,7 +238,7 @@ impl<W: Write> EncoderWriter<W> {
     }
 }
 
-impl<W: Write> Write for EncoderWriter<W> {
+impl<'e, E: Engine, W: io::Write> io::Write for EncoderWriter<'e, E, W> {
     /// Encode input and then write to the delegate writer.
     ///
     /// Under non-error circumstances, this returns `Ok` with the value being the number of bytes
@@ -305,10 +307,9 @@ impl<W: Write> Write for EncoderWriter<W> {
                 self.extra_input[self.extra_input_occupied_len..MIN_ENCODE_CHUNK_SIZE]
                     .copy_from_slice(&input[0..extra_input_read_len]);
 
-                let len = encode_to_slice(
+                let len = self.engine.encode(
                     &self.extra_input[0..MIN_ENCODE_CHUNK_SIZE],
                     &mut self.output[..],
-                    self.config.char_set.encode_table(),
                 );
                 debug_assert_eq!(4, len);
 
@@ -354,10 +355,9 @@ impl<W: Write> Write for EncoderWriter<W> {
         debug_assert_eq!(0, max_input_len % MIN_ENCODE_CHUNK_SIZE);
         debug_assert_eq!(0, input_chunks_to_encode_len % MIN_ENCODE_CHUNK_SIZE);
 
-        encoded_size += encode_to_slice(
+        encoded_size += self.engine.encode(
             &input[..(input_chunks_to_encode_len)],
             &mut self.output[encoded_size..],
-            self.config.char_set.encode_table(),
         );
 
         // not updating `self.output_occupied_len` here because if the below write fails, it should
@@ -390,7 +390,7 @@ impl<W: Write> Write for EncoderWriter<W> {
     }
 }
 
-impl<W: Write> Drop for EncoderWriter<W> {
+impl<'e, E: Engine, W: io::Write> Drop for EncoderWriter<'e, E, W> {
     fn drop(&mut self) {
         if !self.panicked {
             // like `BufWriter`, ignore errors during drop

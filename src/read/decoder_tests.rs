@@ -4,9 +4,11 @@ use rand::{Rng, RngCore};
 use std::{cmp, iter};
 
 use super::decoder::{DecoderReader, BUF_SIZE};
-use crate::encode::encode_config_buf;
-use crate::tests::random_config;
-use crate::{decode_config_buf, DecodeError, STANDARD};
+use crate::encode::encode_engine_string;
+use crate::engine::fast_portable::FastPortable;
+use crate::engine::DEFAULT_ENGINE;
+use crate::tests::{random_alphabet, random_config, random_engine};
+use crate::{decode_engine_vec, DecodeError};
 
 #[test]
 fn simple() {
@@ -27,7 +29,7 @@ fn simple() {
         // Read n bytes at a time.
         for n in 1..base64data.len() + 1 {
             let mut wrapped_reader = io::Cursor::new(base64data);
-            let mut decoder = DecoderReader::new(&mut wrapped_reader, STANDARD);
+            let mut decoder = DecoderReader::from(&mut wrapped_reader, &DEFAULT_ENGINE);
 
             // handle errors as you normally would
             let mut text_got = Vec::new();
@@ -59,7 +61,7 @@ fn trailing_junk() {
         // Read n bytes at a time.
         for n in 1..base64data.len() + 1 {
             let mut wrapped_reader = io::Cursor::new(base64data);
-            let mut decoder = DecoderReader::new(&mut wrapped_reader, STANDARD);
+            let mut decoder = DecoderReader::from(&mut wrapped_reader, &DEFAULT_ENGINE);
 
             // handle errors as you normally would
             let mut buffer = vec![0u8; n];
@@ -98,8 +100,8 @@ fn handles_short_read_from_delegate() {
         rng.fill_bytes(&mut bytes[..size]);
         assert_eq!(size, bytes.len());
 
-        let config = random_config(&mut rng);
-        encode_config_buf(&bytes[..], config, &mut b64);
+        let engine = random_engine(&mut rng);
+        encode_engine_string(&bytes[..], &mut b64, &engine);
 
         let mut wrapped_reader = io::Cursor::new(b64.as_bytes());
         let mut short_reader = RandomShortRead {
@@ -107,7 +109,7 @@ fn handles_short_read_from_delegate() {
             rng: &mut rng,
         };
 
-        let mut decoder = DecoderReader::new(&mut short_reader, config);
+        let mut decoder = DecoderReader::from(&mut short_reader, &engine);
 
         let decoded_len = decoder.read_to_end(&mut decoded).unwrap();
         assert_eq!(size, decoded_len);
@@ -135,12 +137,12 @@ fn read_in_short_increments() {
         rng.fill_bytes(&mut bytes[..]);
         assert_eq!(size, bytes.len());
 
-        let config = random_config(&mut rng);
+        let engine = random_engine(&mut rng);
 
-        encode_config_buf(&bytes[..], config, &mut b64);
+        encode_engine_string(&bytes[..], &mut b64, &engine);
 
         let mut wrapped_reader = io::Cursor::new(&b64[..]);
-        let mut decoder = DecoderReader::new(&mut wrapped_reader, config);
+        let mut decoder = DecoderReader::from(&mut wrapped_reader, &engine);
 
         consume_with_short_reads_and_validate(&mut rng, &bytes[..], &mut decoded, &mut decoder);
     }
@@ -166,12 +168,12 @@ fn read_in_short_increments_with_short_delegate_reads() {
         rng.fill_bytes(&mut bytes[..]);
         assert_eq!(size, bytes.len());
 
-        let config = random_config(&mut rng);
+        let engine = random_engine(&mut rng);
 
-        encode_config_buf(&bytes[..], config, &mut b64);
+        encode_engine_string(&bytes[..], &mut b64, &engine);
 
         let mut base_reader = io::Cursor::new(&b64[..]);
-        let mut decoder = DecoderReader::new(&mut base_reader, config);
+        let mut decoder = DecoderReader::from(&mut base_reader, &engine);
         let mut short_reader = RandomShortRead {
             delegate: &mut decoder,
             rng: &mut rand::thread_rng(),
@@ -201,26 +203,26 @@ fn reports_invalid_last_symbol_correctly() {
         rng.fill_bytes(&mut bytes[..]);
         assert_eq!(size, bytes.len());
 
-        let mut config = random_config(&mut rng);
+        let config = random_config(&mut rng);
+        let alphabet = random_alphabet(&mut rng);
         // changing padding will cause invalid padding errors when we twiddle the last byte
-        config.pad = false;
-
-        encode_config_buf(&bytes[..], config, &mut b64);
+        let engine = FastPortable::from(alphabet, config.with_padding(false));
+        encode_engine_string(&bytes[..], &mut b64, &engine);
         b64_bytes.extend(b64.bytes());
         assert_eq!(b64_bytes.len(), b64.len());
 
         // change the last character to every possible symbol. Should behave the same as bulk
         // decoding whether invalid or valid.
-        for &s1 in config.char_set.encode_table().iter() {
+        for &s1 in alphabet.symbols.iter() {
             decoded.clear();
             bulk_decoded.clear();
 
             // replace the last
             *b64_bytes.last_mut().unwrap() = s1;
-            let bulk_res = decode_config_buf(&b64_bytes[..], config, &mut bulk_decoded);
+            let bulk_res = decode_engine_vec(&b64_bytes[..], &mut bulk_decoded, &engine);
 
             let mut wrapped_reader = io::Cursor::new(&b64_bytes[..]);
-            let mut decoder = DecoderReader::new(&mut wrapped_reader, config);
+            let mut decoder = DecoderReader::from(&mut wrapped_reader, &engine);
 
             let stream_res = decoder.read_to_end(&mut decoded).map(|_| ()).map_err(|e| {
                 e.into_inner()
@@ -249,15 +251,16 @@ fn reports_invalid_byte_correctly() {
         rng.fill_bytes(&mut bytes[..size]);
         assert_eq!(size, bytes.len());
 
-        let config = random_config(&mut rng);
-        encode_config_buf(&bytes[..], config, &mut b64);
+        let engine = random_engine(&mut rng);
+
+        encode_engine_string(&bytes[..], &mut b64, &engine);
         // replace one byte, somewhere, with '*', which is invalid
         let bad_byte_pos = rng.gen_range(0, &b64.len());
         let mut b64_bytes = b64.bytes().collect::<Vec<u8>>();
         b64_bytes[bad_byte_pos] = b'*';
 
         let mut wrapped_reader = io::Cursor::new(b64_bytes.clone());
-        let mut decoder = DecoderReader::new(&mut wrapped_reader, config);
+        let mut decoder = DecoderReader::from(&mut wrapped_reader, &engine);
 
         // some gymnastics to avoid double-moving the io::Error, which is not Copy
         let read_decode_err = decoder
@@ -273,7 +276,7 @@ fn reports_invalid_byte_correctly() {
             .and_then(|o| o);
 
         let mut bulk_buf = Vec::new();
-        let bulk_decode_err = decode_config_buf(&b64_bytes[..], config, &mut bulk_buf).err();
+        let bulk_decode_err = decode_engine_vec(&b64_bytes[..], &mut bulk_buf, &engine).err();
 
         // it's tricky to predict where the invalid data's offset will be since if it's in the last
         // chunk it will be reported at the first padding location because it's treated as invalid

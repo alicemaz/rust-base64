@@ -1,7 +1,9 @@
-use crate::{decode_config, encode::encoded_size, encode_config_buf, CharacterSet, Config};
+use crate::{alphabet, decode_engine, encode::encoded_len, encode_engine_string};
 
 use std::str;
 
+use crate::engine::fast_portable::{FastPortable, FastPortableConfig};
+use crate::engine::{Config, Engine};
 use rand::{
     distributions::{Distribution, Uniform},
     seq::SliceRandom,
@@ -19,10 +21,10 @@ fn roundtrip_random_config_long() {
     roundtrip_random_config(Uniform::new(0, 1000), 10_000);
 }
 
-pub fn assert_encode_sanity(encoded: &str, config: Config, input_len: usize) {
+pub fn assert_encode_sanity(encoded: &str, padded: bool, input_len: usize) {
     let input_rem = input_len % 3;
     let expected_padding_len = if input_rem > 0 {
-        if config.pad {
+        if padded {
             3 - input_rem
         } else {
             0
@@ -31,7 +33,7 @@ pub fn assert_encode_sanity(encoded: &str, config: Config, input_len: usize) {
         0
     };
 
-    let expected_encoded_len = encoded_size(input_len, config).unwrap();
+    let expected_encoded_len = encoded_len(input_len, padded).unwrap();
 
     assert_eq!(expected_encoded_len, encoded.len());
 
@@ -53,29 +55,39 @@ fn roundtrip_random_config(input_len_range: Uniform<usize>, iterations: u32) {
 
         let input_len = input_len_range.sample(&mut rng);
 
-        let config = random_config(&mut rng);
+        let engine = random_engine(&mut rng);
 
         for _ in 0..input_len {
             input_buf.push(rng.gen());
         }
 
-        encode_config_buf(&input_buf, config, &mut encoded_buf);
+        encode_engine_string(&input_buf, &mut encoded_buf, &engine);
 
-        assert_encode_sanity(&encoded_buf, config, input_len);
+        assert_encode_sanity(&encoded_buf, engine.config().padding(), input_len);
 
-        assert_eq!(input_buf, decode_config(&encoded_buf, config).unwrap());
+        assert_eq!(input_buf, decode_engine(&encoded_buf, &engine).unwrap());
     }
 }
 
-pub fn random_config<R: Rng>(rng: &mut R) -> Config {
-    const CHARSETS: &[CharacterSet] = &[
-        CharacterSet::UrlSafe,
-        CharacterSet::Standard,
-        CharacterSet::Crypt,
-        CharacterSet::ImapMutf7,
-        CharacterSet::BinHex,
-    ];
-    let charset = *CHARSETS.choose(rng).unwrap();
-
-    Config::new(charset, rng.gen())
+pub fn random_config<R: Rng>(rng: &mut R) -> FastPortableConfig {
+    FastPortableConfig::from(rng.gen(), rng.gen())
 }
+
+pub fn random_alphabet<R: Rng>(rng: &mut R) -> &'static alphabet::Alphabet {
+    &ALPHABETS.choose(rng).unwrap()
+}
+
+pub fn random_engine<R: Rng>(rng: &mut R) -> FastPortable {
+    let alphabet = random_alphabet(rng);
+    let config = random_config(rng);
+    FastPortable::from(alphabet, config)
+}
+
+const ALPHABETS: &[alphabet::Alphabet] = &[
+    alphabet::URL_SAFE,
+    alphabet::STANDARD,
+    alphabet::CRYPT,
+    alphabet::BCRYPT,
+    alphabet::IMAP_MUTF7,
+    alphabet::BIN_HEX,
+];

@@ -16,10 +16,12 @@ name = "benchmarks"
 harness = false
 
 [dev-dependencies]
-# 0.3.3 requires rust 1.36.0 for stable copied()
 criterion = "0.3.4"
 rand = "0.6.1"
 structopt = "0.3.21"
+# test fixtures for engine tests
+rstest = "0.6.4"
+rstest_reuse = "0.1.1"
 
 [features]
 default = ["std"]

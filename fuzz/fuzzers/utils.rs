@@ -3,12 +3,12 @@ extern crate rand;
 extern crate rand_pcg;
 extern crate ring;
 
-use self::base64::*;
+use base64::{alphabet, engine::fast_portable};
 use self::rand::{Rng, SeedableRng};
 use self::rand_pcg::Pcg32;
 use self::ring::digest;
 
-pub fn random_config(data: &[u8]) -> Config {
+pub fn random_engine(data: &[u8]) -> fast_portable::FastPortable {
     // use sha256 of data as rng seed so it's repeatable
     let sha = digest::digest(&digest::SHA256, data);
 
@@ -17,11 +17,13 @@ pub fn random_config(data: &[u8]) -> Config {
 
     let mut rng = Pcg32::from_seed(seed);
 
-    let charset = if rng.gen() {
-        CharacterSet::UrlSafe
+    let alphabet = if rng.gen() {
+        alphabet::URL_SAFE
     } else {
-        CharacterSet::Standard
+        alphabet::STANDARD
     };
 
-    Config::new(charset, rng.gen())
+    let config = fast_portable::FastPortableConfig::from(rng.gen(), rng.gen());
+
+    fast_portable::FastPortable::from(&alphabet, config)
 }
