@@ -85,7 +85,7 @@ mod tables;
 pub mod write;
 
 mod encode;
-pub use crate::encode::encode_config_slice;
+pub use crate::encode::{encode_config_slice, encoded_size};
 #[cfg(any(feature = "alloc", feature = "std", test))]
 pub use crate::encode::{encode, encode_config, encode_config_buf};
 
